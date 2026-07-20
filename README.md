@@ -1,6 +1,8 @@
 # facemesh
 Use open source face recognition to detect doppelgängers.
 
+If you have a doppelgänger problem or an imposter issue, you should attempt to use fingerprints and DNA. Fingerprints already biologically identify distinct individual human beings, especially if all 10 fingerprints are taken. Face meshes are used to correlate face structure biometrics with sets of 10 fingerprints. DNA testing is ultimately also a good test for identity but sets of 10 fingerprints are adequate to definitely separate out individuals. Fingerprint minutiae from full fingerprint sets can even distinguish identical twins because of small differences in development. Consult with your lawyer. 
+
 This looks for images uploaded into the /img folder, so from /bin you can run: 
 
 $ python3 facemesh.py feigl1.jpg feigl2.jpg 
