@@ -1,6 +1,11 @@
 # facemesh
 Use open source face recognition to detect doppelgängers.
 
+For detecting face landmarks to pupil-align the face meshes, you need to download the latest `face_landmarker.task` from Google and place it in `/bin/` alongside the script: 
+```
+curl -O https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+```
+
 Don't forget to install the requirements from `/bin`:
 ```
 $pip3 install -r requirements.txt
