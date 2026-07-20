@@ -41,28 +41,38 @@ AGE_LABELS = [
     "a photo of a middle-aged adult", "a photo of an elderly senior citizen"
 ]
 
-def analyze_demographics_huggingface(image_path):
-    """ Extracts face crop via InsightFace and runs CLIP zero-shot classification for Race and Age """
+MOOD_LABELS = [
+    "a photo of a happy smiling face", "a photo of a neutral calm face",
+    "a photo of a serious focused face", "a photo of a sad somber face"
+]
+
+def analyze_demographics_huggingface(image_path, include_race=False):
+    """ Extracts face crop via InsightFace and runs CLIP classification for Demographics """
     try:
         img = cv2.imread(image_path)
-        if img is None: return "Offline", "Offline"
+        if img is None: return "Offline", "Offline", "Offline"
         faces = app.get(img)
-        if not faces: return "Offline", "Offline"
+        if not faces: return "Offline", "Offline", "Offline"
         
         bbox = faces[0].bbox.astype(int)
         x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(img.shape[1], bbox[2]), min(img.shape[0], bbox[3])
         
         face_crop = img[y1:y2, x1:x2]
-        if face_crop.size == 0: return "Offline", "Offline"
+        if face_crop.size == 0: return "Offline", "Offline", "Offline"
         
         face_crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(face_crop_rgb)
         
-        race_results = hf_classifier(pil_img, candidate_labels=FAIRFACE_LABELS)
-        race_label = race_results[0]['label'].replace(" person", "").title()
-        race_conf = race_results[0]['score'] * 100
-        race_str = f"{race_label} ({race_conf:.1f}%)"
+        # Race classification (Strictly disabled unless explicitly flagged)
+        if include_race:
+            race_results = hf_classifier(pil_img, candidate_labels=FAIRFACE_LABELS)
+            race_label = race_results[0]['label'].replace(" person", "").title()
+            race_conf = race_results[0]['score'] * 100
+            race_str = f"{race_label} ({race_conf:.1f}%)"
+        else:
+            race_str = "Disabled (Compliance Mode)"
         
+        # Age classification
         age_results = hf_classifier(pil_img, candidate_labels=AGE_LABELS)
         top_age = age_results[0]['label']
         age_map = {
@@ -72,10 +82,21 @@ def analyze_demographics_huggingface(image_path):
             "a photo of an elderly senior citizen": "Senior (60+)"
         }
         age_str = age_map.get(top_age, "Adult (30-59)")
+
+        # Mood classification
+        mood_results = hf_classifier(pil_img, candidate_labels=MOOD_LABELS)
+        top_mood = mood_results[0]['label']
+        mood_map = {
+            "a photo of a happy smiling face": "Happy",
+            "a photo of a neutral calm face": "Neutral",
+            "a photo of a serious focused face": "Serious",
+            "a photo of a sad somber face": "Sad"
+        }
+        mood_str = mood_map.get(top_mood, "Neutral")
         
-        return race_str, age_str
+        return race_str, age_str, mood_str
     except Exception:
-        return "Offline", "Offline"
+        return "Offline", "Offline", "Offline"
 
 def get_pupil_centers(landmarks):
     """ Computes rough pupil centers based on standard 106-point landmark indices. """
@@ -153,7 +174,6 @@ def generate_pupil_aligned_mesh(img, landmarks, target_w, target_h, color, label
         if 0 <= x < target_w and 0 <= y < target_h:
             cv2.circle(canvas, (x, y), 2, (0, 255, 255), -1)
 
-    # Render target/suspect structural title alignment labels inside mesh frames
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.5, target_h / 800.0)
     thickness = max(1, int(target_h / 450.0))
@@ -162,7 +182,6 @@ def generate_pupil_aligned_mesh(img, landmarks, target_w, target_h, color, label
     x_pos = int((target_w - text_size[0]) / 2)
     y_pos = int(target_h * 0.06)
     
-    # Text background strip drop-shadow for clarity
     cv2.putText(canvas, label_text, (x_pos, y_pos), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
     cv2.putText(canvas, label_text, (x_pos, y_pos), font, font_scale, color, thickness, cv2.LINE_AA)
             
@@ -172,6 +191,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="InsightFace Base64 Integrated Verification Pipeline")
     parser.add_argument("target", help="Filename or path of target image")
     parser.add_argument("suspect", help="Filename or path of suspect image")
+    parser.add_argument("--detect-race", action="store_true", help="Explicitly enable race tracking metrics")
     args = parser.parse_args()
 
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -201,18 +221,18 @@ if __name__ == "__main__":
         t_img_res = cv2.resize(t_img, (int(w1 * t_scale), target_height))
         s_img_res = cv2.resize(s_img, (int(w2 * s_scale), target_height))
 
-        color_t = (255, 140, 0)   # Deep Orange
-        color_s = (30, 144, 255)  # Dodger Blue
+        color_t = (255, 140, 0)   
+        color_s = (30, 144, 255)  
         
-        # Inject context text into the upper layout profiles
         t_mesh_canvas = generate_pupil_aligned_mesh(t_img, t_landmarks, t_img_res.shape[1], target_height, color_t, "TARGET FACE MESH")
         s_mesh_canvas = generate_pupil_aligned_mesh(s_img, s_landmarks, s_img_res.shape[1], target_height, color_s, "SUSPECT FACE MESH")
 
         composite_ribbon = np.hstack((t_img_res, t_mesh_canvas, s_img_res, s_mesh_canvas))
         ribbon_w = composite_ribbon.shape[1]
 
-        target_race, target_age = analyze_demographics_huggingface(target_path)
-        suspect_race, suspect_age = analyze_demographics_huggingface(suspect_path)
+        # Call demographics routing flag explicitly (Inside the try block)
+        target_race, target_age, target_mood = analyze_demographics_huggingface(target_path, include_race=args.detect_race)
+        suspect_race, suspect_age, suspect_mood = analyze_demographics_huggingface(suspect_path, include_race=args.detect_race)
 
         if cosine_dist < 0.25:
             forensic_verdict = "MATCH: Absolute identity match (Preserved features / same era)."
@@ -227,16 +247,21 @@ if __name__ == "__main__":
         else:
             forensic_verdict = "NO MATCH: Distinct structures isolated."
 
-        # --- ADVANCED BASE64 ENCODING SYSTEMS ---
-        raw_report_string = f"{target_race}{suspect_race}{cosine_dist:.4f}"
+        # Cryptographic hashing setups
+        raw_report_string = f"{target_race}{suspect_race}{cosine_dist:.4f}{target_mood}"
         sha256_raw = hashlib.sha256(raw_report_string.encode('utf-8')).digest()
         
-        # Convert SHA256 bytes directly to URL-safe Base64 and clean tracking padding
         b64_hash_short = base64.urlsafe_b64encode(sha256_raw).decode('utf-8').replace('=', '').replace('_', '').replace('-', '')[:12]
         
-        # Generate true uniform random bytes for a crisp 8-character Base64 token string
         session_bytes = os.urandom(6)
         b64_token = base64.urlsafe_b64encode(session_bytes).decode('utf-8').replace('=', '')[:8]
+
+        # String builders adapting parameters to opt-in status
+        target_metrics_str = f"Age Range: {target_age} | Mood: {target_mood}"
+        suspect_metrics_str = f"Age Range: {suspect_age} | Mood: {suspect_mood}"
+        if args.detect_race:
+            target_metrics_str = f"Race: {target_race} | " + target_metrics_str
+            suspect_metrics_str = f"Race: {suspect_race} | " + suspect_metrics_str
 
         # Formulate metrics box layout
         font = cv2.FONT_HERSHEY_PLAIN
@@ -249,8 +274,8 @@ if __name__ == "__main__":
             ("=========================================================================", (150, 150, 150)),
             ("               INSIGHTFACE BIOMETRIC IDENTITY & ALIGNMENT REPORT", (0, 255, 255)),
             ("=========================================================================", (150, 150, 150)),
-            (f"TARGET HF METRICS:  Race: {target_race} | Age Range: {target_age}", (200, 255, 200)),
-            (f"SUSPECT HF METRICS: Race: {suspect_race} | Age Range: {suspect_age}", (200, 255, 250)),
+            (f"TARGET HF METRICS:  {target_metrics_str}", (200, 255, 200)),
+            (f"SUSPECT HF METRICS: {suspect_metrics_str}", (200, 255, 250)),
             ("-------------------------------------------------------------------------", (100, 100, 100)),
             (f"COSINE DISTANCE:    {cosine_dist:.4f}  (Match Baseline Threshold < 0.35)", (0, 165, 255)),
             (f"EUCLIDEAN DISTANCE: {euclidean_dist:.4f}", (255, 180, 70)),
@@ -274,7 +299,6 @@ if __name__ == "__main__":
 
         final_output_image = np.vstack((composite_ribbon, console_box))
 
-        # Build clean cryptographic profile name strings
         base_t = os.path.splitext(os.path.basename(target_path))[0]
         base_s = os.path.splitext(os.path.basename(suspect_path))[0]
         output_filename = f"{base_t}_{base_s}_SHA-{b64_hash_short}_TK-{b64_token}.jpg"
