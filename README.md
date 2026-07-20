@@ -19,6 +19,10 @@ to receive an example output using two baseball players who are unrelated doppel
 
 ## Usage
 
+The most scientific aspect of this is euclidean face distance as a measurement for likelihood that two people are doppelgängers of each other. The score ranges from 0.0 (exact same photo) to 2.0 (extremely different looking) and very different looking people can get scores of 0.9 or 1.1 while doppelgänger phenomena often start with a cosine distance below 0.75 or so. People that easily pass for each other are returning 0.5-0.7 when I try this out. Actually same person is likeliest when the euclidean distance is under 0.30 and that's reflected in the text it writes to the output image. 
+
+*Race detection is sketchy:* Even with the "least socially biased" race category detection, it leads to a lot of false positives and a lot of false negatives, even sometimes giving different results on the same person. So it's highly experimental and is less reliable for ethnicity guessing than full fingerprinting (e.g. joint probability of global fingerprint type distributions) but that isn't conclusive either. You need to use court-ordered DNA testing or use biometrics to locate an actual birth certificate that matches the biometrics and then trace the genealogy. For sketchy race guessing, usage becomes `$python3 facemesh.py feigl1.jpg feigl2.jpg --detect-race` 
+
 *Use images with just one face:* This always grabs the first face from the top left. If there are multiple faces in an image, crop the image or blur the other faces out to isolate just one face. It prefers two input images with just one face. 
 
 *Face mesh distance score isn't a fingerprint:* But it does work pretty well to distinguish lookalikes, drawing on an example from baseball of doppelgängers. The euclidean distances between the faces of the same men in different photos are under 0.3 and it's about 0.6 for each other, and most people think they look quite similar until they compare the actual face meshes. This tool helps you understand consciously and with an empirical face structure comparison that they aren't the same individual biological human. 
