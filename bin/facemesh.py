@@ -108,6 +108,20 @@ def get_pupil_centers(landmarks):
         right_pupil = np.mean(landmarks[4:8], axis=0)
     return left_pupil, right_pupil
 
+def calculate_inter_canthal_ratio(landmarks):
+    """ Computes scale-invariant inter-canthal ratio using stable 106-point landmarks """
+    left_inner = landmarks[35]
+    right_inner = landmarks[89]
+    left_outer = landmarks[39]
+    right_outer = landmarks[93]
+    
+    inter_canthal_distance = np.linalg.norm(left_inner - right_inner)
+    outer_bi_ocular_width = np.linalg.norm(left_outer - right_outer)
+    
+    if outer_bi_ocular_width == 0:
+        return 0.0
+    return inter_canthal_distance / outer_bi_ocular_width
+
 def process_face_data(image_path):
     """ Detects faces, extracts the original identity embedding, and gets points """
     abs_image_path = os.path.abspath(image_path)
@@ -213,6 +227,21 @@ if __name__ == "__main__":
         cosine_dist = distance.cosine(vector_target, vector_suspect)
         euclidean_dist = distance.euclidean(vector_target, vector_suspect)
 
+        # Compute Bone-Anchored Canthal Variance
+        ratio_t = calculate_inter_canthal_ratio(t_landmarks)
+        ratio_s = calculate_inter_canthal_ratio(s_landmarks)
+        canthal_variance = abs(ratio_t - ratio_s)
+
+        # Evaluate Canthal Range Comments
+        if canthal_variance <= 0.005:
+            canthal_comment = "Flawless skeletal match. Identical deep bone framework structure."
+        elif 0.005 < canthal_variance <= 0.015:
+            canthal_comment = "Normal biological variance. Structural alignment preserved."
+        elif 0.015 < canthal_variance <= 0.030:
+            canthal_comment = "Borderline variance. Minor structural deviation isolated."
+        else:
+            canthal_comment = "Definitive skeletal mismatch. Underlying skull profile differs completely."
+
         h1, w1 = t_img.shape[:2]
         h2, w2 = s_img.shape[:2]
         target_height = min(h1, h2)
@@ -234,6 +263,7 @@ if __name__ == "__main__":
         target_race, target_age, target_mood = analyze_demographics_huggingface(target_path, include_race=args.detect_race)
         suspect_race, suspect_age, suspect_mood = analyze_demographics_huggingface(suspect_path, include_race=args.detect_race)
 
+        # Baseline assignment from vector space calculations
         if cosine_dist < 0.25:
             forensic_verdict = "MATCH: Absolute identity match (Preserved features / same era)."
         elif 0.25 <= cosine_dist < 0.35:
@@ -246,6 +276,10 @@ if __name__ == "__main__":
             forensic_verdict = "HISTORICAL/GAP ZONE: Probable Cross-Age Match or verified lookalike."
         else:
             forensic_verdict = "NO MATCH: Distinct structures isolated."
+
+        # Hard Biometric Gatekeeper: Override if stable bone structure fails tolerance (3% max skew)
+        if canthal_variance > 0.03:
+            forensic_verdict = f"NO MATCH: Bone structure variance isolated (Canthal Variance: {canthal_variance:.4f})."
 
         # Cryptographic hashing setups
         raw_report_string = f"{target_race}{suspect_race}{cosine_dist:.4f}{target_mood}"
@@ -278,6 +312,8 @@ if __name__ == "__main__":
             (f"SUSPECT HF METRICS: {suspect_metrics_str}", (200, 255, 250)),
             ("-------------------------------------------------------------------------", (100, 100, 100)),
             (f"COSINE DISTANCE:    {cosine_dist:.4f}  (Match Baseline Threshold < 0.35)", (0, 165, 255)),
+            (f"CANTHAL VARIANCE:   {canthal_variance:.4f}  (Skeletal Tolerance Threshold < 0.0300)", (0, 255, 100) if canthal_variance <= 0.03 else (0, 0, 255)),
+            (f"SKELETAL ANALYSIS:  {canthal_comment}", (255, 255, 150)),
             (f"EUCLIDEAN DISTANCE: {euclidean_dist:.4f}", (255, 180, 70)),
             (f"FORENSIC ANALYTIC:  {forensic_verdict}", (255, 100, 255)),
             ("-------------------------------------------------------------------------", (100, 100, 100)),
@@ -286,6 +322,22 @@ if __name__ == "__main__":
             (f"Base64 Session Token:      [{b64_token}]", (255, 255, 0)),
             ("=========================================================================", (150, 150, 150))
         ]
+
+        # --- CONSOLE TERMINAL OUTPUT LOGGING ---
+        print("\n" + "="*73)
+        print("          INSIGHTFACE BIOMETRIC IDENTITY & ALIGNMENT REPORT")
+        print("="*73)
+        print(f"TARGET METRICS  | {target_metrics_str}")
+        print(f"SUSPECT METRICS | {suspect_metrics_str}")
+        print("-"*73)
+        print(f"COSINE DISTANCE   : {cosine_dist:.4f} (Threshold < 0.35)")
+        print(f"CANTHAL VARIANCE  : {canthal_variance:.4f} (Bone Tolerance < 0.0300) " + ("[PASS]" if canthal_variance <= 0.03 else "[CRITICAL FAIL]"))
+        print(f"SKELETAL COMMENT  : {canthal_comment}")
+        print(f"EUCLIDEAN DISTANCE: {euclidean_dist:.4f}")
+        print(f"VERDICT ANALYTIC  : {forensic_verdict}")
+        print("-"*73)
+        print(f"Session Token     : [{b64_token}]")
+        print("="*73 + "\n")
 
         box_height = (len(lines_data) * line_height) + int(line_height * 1.5)
         console_box = np.zeros((box_height, ribbon_w, 3), dtype=np.uint8)
