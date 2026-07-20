@@ -14,7 +14,7 @@ This looks for images uploaded into the `/img` folder, so from /bin you can run:
 ```
 $ python3 facemesh.py feigl1.jpg feigl2.jpg 
 ```
-to receive an example output.
+to receive an example output using two baseball players who are unrelated doppelgängers named Brady FEIGL (born 1990) and Brady FEIGL (born 1995).
 
 If you have a doppelgänger problem or an imposter issue, you should attempt to use fingerprints and DNA. Fingerprints already biologically identify distinct individual human beings, especially if all 10 fingerprints are taken. Face meshes are used to correlate face structure biometrics with sets of 10 fingerprints. DNA testing is ultimately also a good test for identity but sets of 10 fingerprints are adequate to definitely separate out individuals. Fingerprint minutiae from full fingerprint sets can even distinguish identical twins because of small differences in development. Consult with your attorney if you're having that sort of problem and consider hiring a private investigator. Police have stressful lives and might just assume you're crazy without forensic evidence from a private investigator and an attorney but if you can get a photo of the imposter you can compare the euclidean distance of their face mesh with your face mesh as as starting point. But you should use a investigation service and an attorney. If you use this on someone else without permission it might be a privacy issue. I'm including examples from a famous doppelgänger case from baseball that got amused media attention. 
 
