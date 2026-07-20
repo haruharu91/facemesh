@@ -13,7 +13,7 @@ $ python3 facemesh.py feigl1.jpg feigl2.jpg
 
 to receive an example output.
 
-I've uploaded photos of the doppelgänger baseball players both named Brady FEIGL, who had the same Tommy John surgeon but aren't from the same family. One was born in 1990 and one was born in 1995 in different jurisdictions and they didn't know each other, but look similar, style themselves similarly, and both became baseball players. 
+I've uploaded photos of the doppelgänger baseball players both named Brady FEIGL, both 6'4" / 193cm, who had the same Tommy John surgeon but aren't from the same family. One was born in 1990 and one was born in 1995 in different jurisdictions and they didn't know each other, but look similar, style themselves similarly, and both became baseball players. 
 
 /img also contains an example output.
 
@@ -26,3 +26,5 @@ The part that's more scientific is the face mesh distance: face mesh distance is
 So metrics like the euclidean distances between the vector spaces of the 2 face meshes can in fact detect different people. 
 
 The photos that are the same Brady Feigl have a small euclidean distance, like if you use feigl1.jpg and feigl3.jpg or feigl2.jpg and feigl4.jpg, but comparing odd and even results in a greater euclidean distance because they are biologically distinct and just an example from baseball of doppelgängers. 
+
+Consider this scenario: let's say Brady Feigl and Brady Feigl decide to create a rasta reggae expert who looks like them but doesn't really exist. They could get fake IDs made. Maybe the rasta guy that "neither of them knows" is French. They just need a dreadlock wig, maybe some pooka shells, and to study French and reggae music. It doesn't cause a 3rd guy to start to exist, it just means they can play the same character for you, and 2 of the 3 can be in the same room at the same time until they find a 3rd guy, also of the same complexion, hair colour, and height, to put on the pooka shells and dreadlock wig. Only a distinct fingerprint set indicates a distinct real person and an effort should be made to match their body with a real original birth certificate using just biometrics and to match them for a biological origin family using a biological identity standard. People make fake IDs and can simulate someone's existence who isn't real using performance. Abductions use fake IDs, too. There is a real need for biometric identity and for scientific measurements of biologically distinct organisms, not just a reliance on identity documents and performance.
