@@ -24,11 +24,33 @@ app = FaceAnalysis(
 )
 app.prepare(ctx_id=0, det_size=(640, 640))
 
-# --- HUGGING FACE DEMOGRAPHICS IMPORTS ---
-from transformers import pipeline
+# --- HUGGING FACE DEMOGRAPHICS IMPORTS (OFFLINE CONFIGURATION) ---
+from transformers import pipeline, CLIPProcessor, CLIPModel
 from PIL import Image
 
-hf_classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
+# Enforce strict offline mode globally
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+MODEL_LOCAL_PATH = resource_path(os.path.join("models", "clip-vit-base-patch32"))
+
+# Load pipeline strictly from local directory using explicit components
+try:
+    if os.path.exists(MODEL_LOCAL_PATH):
+        processor = CLIPProcessor.from_pretrained(MODEL_LOCAL_PATH, local_files_only=True)
+        model = CLIPModel.from_pretrained(MODEL_LOCAL_PATH, local_files_only=True)
+        
+        hf_classifier = pipeline(
+            "zero-shot-image-classification", 
+            model=model,
+            feature_extractor=processor,
+            tokenizer=processor.tokenizer
+        )
+    else:
+        raise FileNotFoundError(f"Local model folder missing at '{MODEL_LOCAL_PATH}'.")
+except Exception as e:
+    print(f"[Warning]: Failed to load offline HF pipeline: {e}")
+    hf_classifier = None
 
 FAIRFACE_LABELS = [
     "White person", "Black person", "Indian person", 
@@ -48,6 +70,9 @@ MOOD_LABELS = [
 
 def analyze_demographics_huggingface(image_path, include_race=False):
     """ Extracts face crop via InsightFace and runs CLIP classification for Demographics """
+    if hf_classifier is None:
+        return "Offline", "Offline", "Offline"
+
     try:
         img = cv2.imread(image_path)
         if img is None: return "Offline", "Offline", "Offline"
@@ -63,7 +88,6 @@ def analyze_demographics_huggingface(image_path, include_race=False):
         face_crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(face_crop_rgb)
         
-        # Race classification (Strictly disabled unless explicitly flagged)
         if include_race:
             race_results = hf_classifier(pil_img, candidate_labels=FAIRFACE_LABELS)
             race_label = race_results[0]['label'].replace(" person", "").title()
@@ -72,7 +96,6 @@ def analyze_demographics_huggingface(image_path, include_race=False):
         else:
             race_str = "Disabled (Compliance Mode)"
         
-        # Age classification
         age_results = hf_classifier(pil_img, candidate_labels=AGE_LABELS)
         top_age = age_results[0]['label']
         age_map = {
@@ -83,7 +106,6 @@ def analyze_demographics_huggingface(image_path, include_race=False):
         }
         age_str = age_map.get(top_age, "Adult (30-59)")
 
-        # Mood classification
         mood_results = hf_classifier(pil_img, candidate_labels=MOOD_LABELS)
         top_mood = mood_results[0]['label']
         mood_map = {
@@ -99,7 +121,7 @@ def analyze_demographics_huggingface(image_path, include_race=False):
         return "Offline", "Offline", "Offline"
 
 def get_pupil_centers(landmarks):
-    """ Computes rough pupil centers based on standard 106-point landmark indices. """
+    """ Computes pupil centers based on standard 106-point landmark indices. """
     if len(landmarks) >= 96:
         left_pupil = np.mean(landmarks[35:41], axis=0)
         right_pupil = np.mean(landmarks[89:95], axis=0)
@@ -108,22 +130,68 @@ def get_pupil_centers(landmarks):
         right_pupil = np.mean(landmarks[4:8], axis=0)
     return left_pupil, right_pupil
 
-def calculate_inter_canthal_ratio(landmarks):
-    """ Computes scale-invariant inter-canthal ratio using stable 106-point landmarks """
-    left_inner = landmarks[35]
-    right_inner = landmarks[89]
-    left_outer = landmarks[39]
-    right_outer = landmarks[93]
-    
-    inter_canthal_distance = np.linalg.norm(left_inner - right_inner)
-    outer_bi_ocular_width = np.linalg.norm(left_outer - right_outer)
-    
-    if outer_bi_ocular_width == 0:
-        return 0.0
-    return inter_canthal_distance / outer_bi_ocular_width
+def extract_pitch_normalized_ratios(landmarks, pitch_deg=0.0):
+    """ Extracts scale-invariant ratios with 3D pitch correction applied to vertical axes. """
+    en_left, en_right = landmarks[35], landmarks[89]      # Inner canthi
+    ex_left, ex_right = landmarks[39], landmarks[93]      # Outer canthi
+    left_pupil, right_pupil = get_pupil_centers(landmarks) # Pupils
+    nasion = landmarks[16]                                # Bony nasal bridge root
+    subnasale = landmarks[86]                             # Anterior nasal spine attachment
+
+    w_ex = np.linalg.norm(ex_left - ex_right)
+    w_en = np.linalg.norm(en_left - en_right)
+    if w_ex == 0 or w_en == 0:
+        return {"canthal": 0.0, "pupillary": 0.0, "composite_nasion": 0.0, "subnasale": 0.0}
+
+    pitch_rad = np.radians(abs(pitch_deg))
+    cos_correction = max(0.20, np.cos(pitch_rad))
+
+    raw_2d_nasion = np.linalg.norm(nasion - subnasale)
+    pitch_corrected_nasion = raw_2d_nasion / cos_correction
+
+    nasion_ratio_ex = pitch_corrected_nasion / w_ex
+    nasion_ratio_en = pitch_corrected_nasion / w_en
+    composite_nasion_ratio = (nasion_ratio_ex + nasion_ratio_en) / 2.0
+
+    return {
+        "canthal": w_en / w_ex,
+        "pupillary": np.linalg.norm(left_pupil - right_pupil) / w_ex,
+        "composite_nasion": composite_nasion_ratio,
+        "subnasale": (np.linalg.norm(landmarks[80] - landmarks[82]) / cos_correction) / w_ex
+    }
+
+def compute_skeletal_index_array(landmarks_t, pitch_t, landmarks_s, pitch_s):
+    """ Computes individual landmark variances with 3D pitch pose compensation. """
+    r_t = extract_pitch_normalized_ratios(landmarks_t, pitch_t)
+    r_s = extract_pitch_normalized_ratios(landmarks_s, pitch_s)
+
+    weights_config = [
+        ("Intercanthal Ratio (en-en / ex-ex)", "canthal", 0.55, "Very High (Rigid Anchor)"),
+        ("Interpupillary Ratio (IPD / ex-ex)", "pupillary", 0.25, "Very High (Orbital Fixed)"),
+        ("Composite Nasion Ridge (3D Pitch-Corrected)", "composite_nasion", 0.15, "High (Pitch Normalized)"),
+        ("Subnasale Anchor Ratio (Alar Base / ex-ex)", "subnasale", 0.05, "Moderate")
+    ]
+
+    skeletal_array = []
+    composite_variance_pct = 0.0
+
+    for label, key, weight, inv_level in weights_config:
+        var_pct = abs(r_t[key] - r_s[key]) * 100.0
+        composite_variance_pct += weight * var_pct
+        skeletal_array.append({
+            "label": label,
+            "weight": weight,
+            "variance_pct": var_pct,
+            "invariance": inv_level
+        })
+
+    skeletal_array.sort(key=lambda x: x["weight"], reverse=True)
+    canthal_var_pct = abs(r_t["canthal"] - r_s["canthal"]) * 100.0
+
+    return canthal_var_pct, composite_variance_pct, skeletal_array
 
 def process_face_data(image_path):
-    """ Detects faces, extracts the original identity embedding, and gets points """
+    """ Detects faces, extracts embedding, pitch angle, and landmark points """
     abs_image_path = os.path.abspath(image_path)
     img = cv2.imread(abs_image_path)
     if img is None:
@@ -142,23 +210,43 @@ def process_face_data(image_path):
         
     if landmarks is None:
         raise ValueError("Model attribute mismatch. Landmark keys missing.")
+
+    pitch_angle = float(face.pose[0]) if hasattr(face, 'pose') and face.pose is not None else 0.0
         
-    return img, landmarks, face.normed_embedding
+    return img, landmarks, face.normed_embedding, pitch_angle
 
 def generate_pupil_aligned_mesh(img, landmarks, target_w, target_h, color, label_text):
-    """ Normalizes, scales, and aligns a face mesh with a localized overlay header string. """
+    """
+    Normalizes, scales, and levels a face mesh canvas.
+    Performs 2D similarity transform (translation, scaling, 2D roll angle leveling)
+    so both pupils align horizontally on the visual canvas.
+    """
     left_pupil, right_pupil = get_pupil_centers(landmarks)
     
     pupil_center = (left_pupil + right_pupil) / 2.0
     pupil_distance = np.linalg.norm(left_pupil - right_pupil)
     
+    # Calculate 2D roll angle to level pupils horizontally
+    d_y = right_pupil[1] - left_pupil[1]
+    d_x = right_pupil[0] - left_pupil[0]
+    angle_rad = np.arctan2(d_y, d_x)
+
     desired_dist = target_w * 0.25
     scale = desired_dist / pupil_distance
     
     canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
     canvas_center = np.array([target_w / 2.0, target_h / 2.0])
     
-    aligned_landmarks = (landmarks - pupil_center) * scale + canvas_center
+    # 1. Translate to origin
+    centered = landmarks - pupil_center
+    
+    # 2. Rotate to level eyes horizontally (2D alignment)
+    cos_a, sin_a = np.cos(-angle_rad), np.sin(-angle_rad)
+    rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    rotated = np.dot(centered, rot_matrix)
+    
+    # 3. Scale and translate to canvas center
+    aligned_landmarks = (rotated * scale) + canvas_center
     
     rect = (0, 0, target_w, target_h)
     subdiv = cv2.Subdiv2D(rect)
@@ -189,20 +277,27 @@ def generate_pupil_aligned_mesh(img, landmarks, target_w, target_h, color, label
             cv2.circle(canvas, (x, y), 2, (0, 255, 255), -1)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.5, target_h / 800.0)
+    font_scale = max(0.45, target_h / 850.0)
     thickness = max(1, int(target_h / 450.0))
-    text_size = cv2.getTextSize(label_text, font, font_scale, thickness)[0]
     
+    # Single Header Label
+    text_size = cv2.getTextSize(label_text, font, font_scale, thickness)[0]
     x_pos = int((target_w - text_size[0]) / 2)
     y_pos = int(target_h * 0.06)
-    
     cv2.putText(canvas, label_text, (x_pos, y_pos), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
     cv2.putText(canvas, label_text, (x_pos, y_pos), font, font_scale, color, thickness, cv2.LINE_AA)
-            
+
     return canvas
 
+def calc_font_scale(text, font, base_scale, thickness, max_width):
+    """ Dynamically scales font down to fit strictly inside maximum image boundaries """
+    text_w = cv2.getTextSize(text, font, base_scale, thickness)[0][0]
+    if text_w > max_width:
+        return base_scale * (max_width / float(text_w))
+    return base_scale
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="InsightFace Base64 Integrated Verification Pipeline")
+    parser = argparse.ArgumentParser(description="InsightFace 3D Pitch-Compensated Identity Framework")
     parser.add_argument("target", help="Filename or path of target image")
     parser.add_argument("suspect", help="Filename or path of suspect image")
     parser.add_argument("--detect-race", action="store_true", help="Explicitly enable race tracking metrics")
@@ -219,145 +314,176 @@ if __name__ == "__main__":
         sys.exit(1)
 
     try:
-        print("\n--- Running Stable Identity Framework ---")
+        print("\n--- Running Dual-Axis Biometric & Skeletal Pipeline ---")
         
-        t_img, t_landmarks, vector_target = process_face_data(target_path)
-        s_img, s_landmarks, vector_suspect = process_face_data(suspect_path)
+        t_img, t_landmarks, vector_target, pitch_t = process_face_data(target_path)
+        s_img, s_landmarks, vector_suspect, pitch_s = process_face_data(suspect_path)
 
-        cosine_dist = distance.cosine(vector_target, vector_suspect)
-        euclidean_dist = distance.euclidean(vector_target, vector_suspect)
+        # 1. Face Mesh Cosine Distance (Mask / Persona Match)
+        face_mesh_cosine_dist = distance.cosine(vector_target, vector_suspect)
 
-        # Compute Bone-Anchored Canthal Variance
-        ratio_t = calculate_inter_canthal_ratio(t_landmarks)
-        ratio_s = calculate_inter_canthal_ratio(s_landmarks)
-        canthal_variance = abs(ratio_t - ratio_s)
+        # 2 & 3. Pitch-Normalised Canthal Variance (%) & Descending Weighted Skeletal Array
+        canthal_var_pct, composite_skel_var, skeletal_array = compute_skeletal_index_array(t_landmarks, pitch_t, s_landmarks, pitch_s)
 
-        # Evaluate Canthal Range Comments
-        if canthal_variance <= 0.005:
-            canthal_comment = "Flawless skeletal match. Identical deep bone framework structure."
-        elif 0.005 < canthal_variance <= 0.015:
-            canthal_comment = "Normal biological variance. Structural alignment preserved."
-        elif 0.015 < canthal_variance <= 0.030:
-            canthal_comment = "Borderline variance. Minor structural deviation isolated."
+        # Match Likelihood Evaluation
+        mask_match_pass = face_mesh_cosine_dist < 0.35
+        canthus_match_pass = canthal_var_pct <= 3.0
+        skeletal_index_pass = composite_skel_var <= 2.5
+
+        mask_likelihood = "HIGH LIKELIHOOD" if face_mesh_cosine_dist < 0.28 else ("MODERATE LIKELIHOOD" if mask_match_pass else "UNLIKELY")
+        canthus_likelihood = "HIGH LIKELIHOOD" if canthal_var_pct <= 1.0 else ("MODERATE LIKELIHOOD" if canthus_match_pass else "UNLIKELY")
+        skeletal_likelihood = "HIGH LIKELIHOOD" if composite_skel_var <= 1.2 else ("MODERATE LIKELIHOOD" if skeletal_index_pass else "UNLIKELY")
+
+        # 4. Persona State Analytic Categorization
+        if mask_match_pass and skeletal_index_pass:
+            persona_state = "STATE 1: AUTHENTIC IDENTITY MATCH (Matching Persona & Skull Structure)"
+        elif not mask_match_pass and skeletal_index_pass:
+            persona_state = "STATE 2: ACTOR PERSONA / CHARACTER MASK (Distinct Persona Mask, IDENTICAL Skull Body)"
+        elif mask_match_pass and not skeletal_index_pass:
+            persona_state = "STATE 3: HIGH-FIDELITY DOPPELGANGER / MPO SPOOF (Matching Style, DIFFERENT Skull Body)"
         else:
-            canthal_comment = "Definitive skeletal mismatch. Underlying skull profile differs completely."
+            persona_state = "STATE 4: DISTINCT INDIVIDUALS (Totally Different People Across All Metrics)"
+
+        # --- RESIZING & RESOLUTION UPSCALING ---
+        min_default_height = 2160
 
         h1, w1 = t_img.shape[:2]
         h2, w2 = s_img.shape[:2]
-        target_height = min(h1, h2)
-        
+
+        # Use the largest dimension or the default floor height
+        target_height = max(min_default_height, h1, h2)
+
         t_scale, s_scale = target_height / h1, target_height / h2
-        t_img_res = cv2.resize(t_img, (int(w1 * t_scale), target_height))
-        s_img_res = cv2.resize(s_img, (int(w2 * s_scale), target_height))
+        t_img_res = cv2.resize(t_img, (int(w1 * t_scale), target_height), interpolation=cv2.INTER_CUBIC)
+        s_img_res = cv2.resize(s_img, (int(w2 * s_scale), target_height), interpolation=cv2.INTER_CUBIC)
 
         color_t = (255, 140, 0)   
         color_s = (30, 144, 255)  
         
-        t_mesh_canvas = generate_pupil_aligned_mesh(t_img, t_landmarks, t_img_res.shape[1], target_height, color_t, "TARGET FACE MESH")
-        s_mesh_canvas = generate_pupil_aligned_mesh(s_img, s_landmarks, s_img_res.shape[1], target_height, color_s, "SUSPECT FACE MESH")
+        # Mesh Generation
+        t_mesh_canvas = generate_pupil_aligned_mesh(
+            t_img, t_landmarks, t_img_res.shape[1], target_height, color_t, "TARGET FACE MESH"
+        )
+        s_mesh_canvas = generate_pupil_aligned_mesh(
+            s_img, s_landmarks, s_img_res.shape[1], target_height, color_s, "SUSPECT FACE MESH"
+        )
 
         composite_ribbon = np.hstack((t_img_res, t_mesh_canvas, s_img_res, s_mesh_canvas))
         ribbon_w = composite_ribbon.shape[1]
 
-        # Call demographics routing flag explicitly (Inside the try block)
+        # --- DUAL HASH GENERATION ---
+        success, ribbon_png_bytes = cv2.imencode('.png', composite_ribbon)
+        if not success:
+            raise RuntimeError("Failed to encode visual ribbon image for hashing.")
+        
+        sha_img_hex = hashlib.sha256(ribbon_png_bytes.tobytes()).hexdigest()
+        sha_img_b64 = base64.urlsafe_b64encode(hashlib.sha256(ribbon_png_bytes.tobytes()).digest()).decode('utf-8').rstrip('=')[:12]
+
         target_race, target_age, target_mood = analyze_demographics_huggingface(target_path, include_race=args.detect_race)
         suspect_race, suspect_age, suspect_mood = analyze_demographics_huggingface(suspect_path, include_race=args.detect_race)
 
-        # Baseline assignment from vector space calculations
-        if cosine_dist < 0.25:
-            forensic_verdict = "MATCH: Absolute identity match (Preserved features / same era)."
-        elif 0.25 <= cosine_dist < 0.35:
-            forensic_verdict = "MATCH: Confident identity match (Typical real-world variations)."
-        elif 0.35 <= cosine_dist < 0.45:
-            forensic_verdict = "CRITICAL RISK: High-fidelity Doppelganger / Lookalike isolated."
-        elif 0.45 <= cosine_dist <= 0.55:
-            forensic_verdict = "AMBIGUOUS ZONE: Structural similarities detected."
-        elif 0.55 < cosine_dist <= 0.68:
-            forensic_verdict = "HISTORICAL/GAP ZONE: Probable Cross-Age Match or verified lookalike."
-        else:
-            forensic_verdict = "NO MATCH: Distinct structures isolated."
-
-        # Hard Biometric Gatekeeper: Override if stable bone structure fails tolerance (3% max skew)
-        if canthal_variance > 0.03:
-            forensic_verdict = f"NO MATCH: Bone structure variance isolated (Canthal Variance: {canthal_variance:.4f})."
-
-        # Cryptographic hashing setups
-        raw_report_string = f"{target_race}{suspect_race}{cosine_dist:.4f}{target_mood}"
-        sha256_raw = hashlib.sha256(raw_report_string.encode('utf-8')).digest()
-        
-        b64_hash_short = base64.urlsafe_b64encode(sha256_raw).decode('utf-8').replace('=', '').replace('_', '').replace('-', '')[:12]
-        
-        session_bytes = os.urandom(6)
-        b64_token = base64.urlsafe_b64encode(session_bytes).decode('utf-8').replace('=', '')[:8]
-
-        # String builders adapting parameters to opt-in status
-        target_metrics_str = f"Age Range: {target_age} | Mood: {target_mood}"
-        suspect_metrics_str = f"Age Range: {suspect_age} | Mood: {suspect_mood}"
+        target_metrics_str = f"Age: {target_age} | Mood: {target_mood}"
+        suspect_metrics_str = f"Age: {suspect_age} | Mood: {suspect_mood}"
         if args.detect_race:
             target_metrics_str = f"Race: {target_race} | " + target_metrics_str
             suspect_metrics_str = f"Race: {suspect_race} | " + suspect_metrics_str
 
-        # Formulate metrics box layout
-        font = cv2.FONT_HERSHEY_PLAIN
-        font_scale = max(1.1, target_height / 320.0)
-        thickness = max(1, int(target_height / 420.0))
-        line_height = int(target_height * 0.070)
-        sha_hex_string = hashlib.sha256(raw_report_string.encode('utf-8')).hexdigest()
+        raw_data_payload = (
+            f"TARGET:{os.path.basename(target_path)}|PITCH:{pitch_t:.4f}|"
+            f"SUSPECT:{os.path.basename(suspect_path)}|PITCH:{pitch_s:.4f}|"
+            f"COS_DIST:{face_mesh_cosine_dist:.6f}|CANTHAL_VAR:{canthal_var_pct:.6f}|"
+            f"SKEL_VAR:{composite_skel_var:.6f}"
+        )
+        sha_data_hex = hashlib.sha256(raw_data_payload.encode('utf-8')).hexdigest()
+        sha_data_b64 = base64.urlsafe_b64encode(hashlib.sha256(raw_data_payload.encode('utf-8')).digest()).decode('utf-8').rstrip('=')[:12]
 
+        session_bytes = os.urandom(6)
+        b64_token = base64.urlsafe_b64encode(session_bytes).decode('utf-8').rstrip('=')[:8]
+
+        font = cv2.FONT_HERSHEY_PLAIN
+        font_scale = max(0.95, target_height / 380.0)
+        thickness = max(1, int(target_height / 500.0))
+        line_height = int(target_height * 0.048)
+
+        # REORGANIZED DISPLAY LAYOUT
         lines_data = [
-            ("=========================================================================", (150, 150, 150)),
-            ("               INSIGHTFACE BIOMETRIC IDENTITY & ALIGNMENT REPORT", (0, 255, 255)),
-            ("=========================================================================", (150, 150, 150)),
-            (f"TARGET HF METRICS:  {target_metrics_str}", (200, 255, 200)),
-            (f"SUSPECT HF METRICS: {suspect_metrics_str}", (200, 255, 250)),
-            ("-------------------------------------------------------------------------", (100, 100, 100)),
-            (f"COSINE DISTANCE:    {cosine_dist:.4f}  (Match Baseline Threshold < 0.35)", (0, 165, 255)),
-            (f"CANTHAL VARIANCE:   {canthal_variance:.4f}  (Skeletal Tolerance Threshold < 0.0300)", (0, 255, 100) if canthal_variance <= 0.03 else (0, 0, 255)),
-            (f"SKELETAL ANALYSIS:  {canthal_comment}", (255, 255, 150)),
-            (f"EUCLIDEAN DISTANCE: {euclidean_dist:.4f}", (255, 180, 70)),
-            (f"FORENSIC ANALYTIC:  {forensic_verdict}", (255, 100, 255)),
-            ("-------------------------------------------------------------------------", (100, 100, 100)),
-            (f"SHA-256 Checksum (Hex):    {sha_hex_string[:32]}...", (170, 170, 170)),  
-            (f"SHA-256 Compress (Base64): {b64_hash_short}", (140, 210, 140)),
-            (f"Base64 Session Token:      [{b64_token}]", (255, 255, 0)),
-            ("=========================================================================", (150, 150, 150))
+            ("==================================================================================", (150, 150, 150)),
+            ("                   INSIGHTFACE DUAL-AXIS IDENTITY & PERSONA REPORT", (0, 255, 255)),
+            ("==================================================================================", (150, 150, 150)),
+            ("[ SECTION A: VISUAL DEMOGRAPHICS & POSE ]", (255, 200, 100)),
+            (f"  * TARGET METRICS  : {target_metrics_str} [3D Pitch: {pitch_t:+.1f}deg]", (200, 255, 200)),
+            (f"  * SUSPECT METRICS : {suspect_metrics_str} [3D Pitch: {pitch_s:+.1f}deg]", (200, 255, 250)),
+            ("----------------------------------------------------------------------------------", (100, 100, 100)),
+            ("[ SECTION B: CORE BIOMETRIC MATCH EVALUATION ]", (255, 200, 100)),
+            (f"  1. MASK MATCH (Face Mesh Cosine Dist) : {face_mesh_cosine_dist:.4f}   [{mask_likelihood}]", (0, 165, 255)),
+            (f"  2. CANTHUS MATCH (Intercanthal Var)   : {canthal_var_pct:.2f}%     [{canthus_likelihood}]", (0, 255, 100) if canthus_match_pass else (0, 0, 255)),
+            (f"  3. COMPOSITE SKELETAL INDEX VARIANCE  : {composite_skel_var:.2f}%     [{skeletal_likelihood}]", (0, 255, 200) if skeletal_index_pass else (0, 0, 255)),
+            ("----------------------------------------------------------------------------------", (100, 100, 100)),
+            ("[ SECTION C: SKELETAL INDEX ARRAY (Descending Weight Order) ]", (255, 255, 150))
         ]
 
-        # --- CONSOLE TERMINAL OUTPUT LOGGING ---
-        print("\n" + "="*73)
-        print("          INSIGHTFACE BIOMETRIC IDENTITY & ALIGNMENT REPORT")
-        print("="*73)
-        print(f"TARGET METRICS  | {target_metrics_str}")
-        print(f"SUSPECT METRICS | {suspect_metrics_str}")
-        print("-"*73)
-        print(f"COSINE DISTANCE   : {cosine_dist:.4f} (Threshold < 0.35)")
-        print(f"CANTHAL VARIANCE  : {canthal_variance:.4f} (Bone Tolerance < 0.0300) " + ("[PASS]" if canthal_variance <= 0.03 else "[CRITICAL FAIL]"))
-        print(f"SKELETAL COMMENT  : {canthal_comment}")
-        print(f"EUCLIDEAN DISTANCE: {euclidean_dist:.4f}")
-        print(f"VERDICT ANALYTIC  : {forensic_verdict}")
-        print("-"*73)
-        print(f"Session Token     : [{b64_token}]")
-        print("="*73 + "\n")
+        for item in skeletal_array:
+            lines_data.append((
+                f"     * [w={item['weight']:.2f}] {item['label']:<42}: {item['variance_pct']:.2f}% var ({item['invariance']})",
+                (220, 220, 170)
+            ))
 
+        lines_data.extend([
+            ("----------------------------------------------------------------------------------", (100, 100, 100)),
+            ("[ SECTION D: SYNTHESIS & DUAL-HASH VERIFICATION ]", (255, 200, 100)),
+            (f"  4. PERSONA ANALYTIC       : {persona_state}", (255, 100, 255)),
+            (f"  * DATA SHA-256 (Hex)      : {sha_data_hex}", (170, 170, 170)),
+            (f"  * IMAGE SHA-256 (Hex)     : {sha_img_hex}", (170, 170, 170)),
+            (f"  * B64 TOKENS (Data|Image) : [{sha_data_b64} | {sha_img_b64}]  Session: [{b64_token}]", (140, 210, 140)),
+            ("==================================================================================", (150, 150, 150))
+        ])
+
+        # --- LOG TO CONSOLE TERMINAL ---
+        print("\n" + "="*82)
+        print("                   INSIGHTFACE DUAL-AXIS IDENTITY & PERSONA REPORT")
+        print("="*82)
+        print("[ SECTION A: VISUAL DEMOGRAPHICS & POSE ]")
+        print(f"  * TARGET METRICS  : {target_metrics_str} [3D Pitch: {pitch_t:+.1f}°]")
+        print(f"  * SUSPECT METRICS : {suspect_metrics_str} [3D Pitch: {pitch_s:+.1f}°]")
+        print("-"*82)
+        print("[ SECTION B: CORE BIOMETRIC MATCH EVALUATION ]")
+        print(f"  1. MASK MATCH (Face Mesh Cosine Dist) : {face_mesh_cosine_dist:.4f} [{mask_likelihood}]")
+        print(f"  2. CANTHUS MATCH (Intercanthal Var)   : {canthal_var_pct:.2f}% [{canthus_likelihood}]")
+        print(f"  3. COMPOSITE SKELETAL INDEX VARIANCE  : {composite_skel_var:.2f}% [{skeletal_likelihood}]")
+        print("-"*82)
+        print("[ SECTION C: SKELETAL INDEX ARRAY (Descending Weight Order) ]")
+        for item in skeletal_array:
+            print(f"     * [w={item['weight']:.2f}] {item['label']:<42}: {item['variance_pct']:.2f}% var ({item['invariance']})")
+        print("-"*82)
+        print("[ SECTION D: SYNTHESIS & DUAL-HASH VERIFICATION ]")
+        print(f"  4. PERSONA ANALYTIC       : {persona_state}")
+        print(f"  * DATA SHA-256 (Hex)      : {sha_data_hex}")
+        print(f"  * IMAGE SHA-256 (Hex)     : {sha_img_hex}")
+        print(f"  * B64 TOKENS (Data|Image) : [{sha_data_b64} | {sha_img_b64}] | Session: [{b64_token}]")
+        print("="*82 + "\n")
+
+        # --- DRAW ON IMAGE CANVAS ---
         box_height = (len(lines_data) * line_height) + int(line_height * 1.5)
         console_box = np.zeros((box_height, ribbon_w, 3), dtype=np.uint8)
 
         y_cursor = int(line_height * 1.2)
         x_padding = int(ribbon_w * 0.012)
-        
+        max_printable_w = ribbon_w - (x_padding * 2)
+
         for text_str, color_bgr in lines_data:
-            cv2.putText(console_box, text_str, (x_padding, y_cursor), font, font_scale, color_bgr, thickness, cv2.LINE_AA)
+            applied_scale = calc_font_scale(text_str, font, font_scale, thickness, max_printable_w)
+            cv2.putText(console_box, text_str, (x_padding, y_cursor), font, applied_scale, color_bgr, thickness, cv2.LINE_AA)
             y_cursor += line_height
 
         final_output_image = np.vstack((composite_ribbon, console_box))
 
         base_t = os.path.splitext(os.path.basename(target_path))[0]
         base_s = os.path.splitext(os.path.basename(suspect_path))[0]
-        output_filename = f"{base_t}_{base_s}_SHA-{b64_hash_short}_TK-{b64_token}.jpg"
+        output_filename = f"{base_t}_{base_s}_SHA-{sha_data_b64}_TK-{b64_token}.jpg"
         
         export_path = os.path.join(os.path.dirname(target_path), output_filename)
         cv2.imwrite(export_path, final_output_image)
-        print(f"↳ Successfully exported unified biometric report to:\n  {export_path}\n")
+        print(f"↳ Successfully exported report image to:\n  {export_path}\n")
 
     except Exception as e:
         print(f"\n[Execution Error]: {e}\n")
