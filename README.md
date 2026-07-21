@@ -2,15 +2,33 @@
 Use open source face recognition to detect doppelgängers.
 
 ## Installation
+
+### Download Google Landmarker
 For detecting face landmarks to pupil-align the face meshes, you need to download the latest `face_landmarker.task` from Google and place it in `/bin/` alongside the script: 
 ```
 curl -O https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
 ```
 
+Homework assignment: Surely this gives away that Gemini helped vibecode a rapid prototype, so find out what every other LLM tells you to use as a face landmarker.
+
+### Requirements.txt
 Don't forget to install the requirements from `/bin`:
 ```
-$pip3 install -r requirements.txt
+$pip3 install -r bin/requirements.txt
 ```
+
+### HuggingFace CLI tool for offline
+Install the Hugging Face CLI tool to download offline models:
+```
+pip3 install huggingface_hub
+```
+
+### Download the HuggingFace model repository directly into your local models directory
+```
+hf download "openai/clip-vit-base-patch32" --local-dir "models/clip-vit-base-patch32"
+```
+
+## Basic Usage
 This looks for images uploaded into the `/img` folder, so from /bin you can run: 
 ```
 $ python3 facemesh.py feigl1.jpg feigl2.jpg 
